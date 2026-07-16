@@ -16,16 +16,6 @@ pip install -r requirements.txt
 cp .env.example .env             # fill in your Gmail app password
 ```
 
-If you're upgrading an existing install that only had CLFS data (an old
-database with a `hcpcs_pricing` table instead of `fee_schedule_pricing`),
-run this once before anything else:
-```bash
-python migrate_legacy_db.py
-```
-It's a one-time script — it copies old rows into the current standardized
-table and leaves the old table in place untouched. It's safe to run more
-than once, and safe to delete once you've confirmed you don't need it.
-
 ---
 
 ## Commands (`main.py`)
@@ -55,7 +45,6 @@ than once, and safe to delete once you've confirmed you don't need it.
 | `notifier/` | Sends the summary/error emails |
 | `tests/` | Automated checks that simulate the pipeline to make sure everything still works |
 | `clfs.db` | The database file itself — where all the pricing data lives |
-| `migrate_legacy_db.py` | One-time script to move an old CLFS-only database into the current shared schema |
 
 ---
 
@@ -123,6 +112,8 @@ rows carry the real values — so the two sources never collide.
 
 ## Rows currently in the database
 
+These counts will keep increasing as new CLFS/MPFS files are added over time.
+
 | | Row count |
 |---|---|
 | **Total rows** in `fee_schedule_pricing` | 3,220,894 |
@@ -131,8 +122,21 @@ rows carry the real values — so the two sources never collide.
 
 ---
 
+## Technologies used
+
+- **Python** — core language for the entire pipeline
+- **Requests** / **BeautifulSoup** — scraping CMS.gov (listing pages, file downloads, HTML parsing)
+- **SQLite** — the local database (`fee_schedule_pricing`, `processed_files`, `change_log`)
+- **smtplib (Gmail SMTP)** — sending email notifications
+- **schedule** — the repeating-timer scheduler for `python main.py schedule`
+- **Mermaid** — architecture diagram in this README
+
+---
+
 ## Screenshots
 
+### Database photo
 ![alt text](image.png)
 
+### Email notification
 ![alt text](image-1.png)
