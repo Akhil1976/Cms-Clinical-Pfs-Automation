@@ -9,3 +9,6 @@ venv/
 .env
 clfs.db
 *.db
+clfs.db-shm
+clfs.db-wal
+migrate_legacy_db.py 
