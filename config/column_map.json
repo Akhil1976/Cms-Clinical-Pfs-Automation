@@ -1,0 +1,24 @@
+{
+  "_comment": "Each logical field lists every header spelling CMS has used across recent CLFS quarterly files. The parser matches case-insensitively and ignores spaces/underscores. If a future CMS file uses a header not listed here, add it to the matching list below instead of touching any code.",
+
+  "hcpcs_code": ["hcpcs", "hcpcs code", "hcpcscode", "procedure code", "code", "cpt hcpcs code"],
+  "modifier": ["modifier", "mod", "mod1", "modifier1"],
+  "description": ["description", "short description", "long description", "desc", "test description", "procedure description", "shortdesc", "longdesc", "extendedlongdesc"],
+  "effective_date": ["effective date", "eff date", "effdate", "effective_date", "start date"],
+  "termination_date": ["termination date", "term date", "termdate", "termination_date", "end date"],
+  "indicator": ["indicator", "ind", "status indicator", "carrier indicator", "national local indicator", "nl indicator"],
+  "price": ["price", "fee", "payment amount", "national limitation amount", "amount", "national fee", "nla", "rate"],
+  "calendar_year": ["year", "calendar year", "cy"],
+
+  "_fallback_positional_map": {
+    "_comment": "Used ONLY if a file has no header row at all. Fill these in with 0-based column indexes after inspecting one real downloaded file with --inspect. Leave -1 for fields that don't apply.",
+    "hcpcs_code": 0,
+    "modifier": 1,
+    "description": 2,
+    "effective_date": 3,
+    "termination_date": 4,
+    "indicator": 5,
+    "price": 6,
+    "calendar_year": -1
+  }
+}

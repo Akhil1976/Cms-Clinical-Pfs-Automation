@@ -1,0 +1,26 @@
+{
+  "_comment": "Same idea as config/column_map.json, but for the Physician Fee Schedule (MPFS) National Payment Amount File. Add new header spellings here (not in code) if a future CMS file uses one not listed yet.",
+
+  "hcpcs_code": ["hcpcs", "hcpcs code", "hcpcscode", "procedure code", "code"],
+  "carrier_id": ["carrier number", "carrier", "carrier id", "mdcr carrier id"],
+  "locality": ["locality", "locality number", "locality code"],
+  "modifier": ["modifier", "mod", "mod1", "modifier1"],
+  "year": ["year", "calendar year", "cy"],
+  "non_facility_price": ["non facility fee schedule amount", "non-facility fee schedule amount", "nonfacility fee schedule amount", "non facility price"],
+  "facility_price": ["facility fee schedule amount", "facility price"],
+  "status_code": ["status code", "status", "procedure status code"],
+  "description": ["description", "short description", "procedure description"],
+
+  "_fallback_positional_map": {
+    "_comment": "Used ONLY if a file has no header row at all. Fill these in with 0-based column indexes after inspecting one real downloaded MPFS file with --inspect. Leave -1 for fields that don't apply.",
+    "hcpcs_code": 0,
+    "carrier_id": 1,
+    "locality": 2,
+    "modifier": 3,
+    "year": -1,
+    "non_facility_price": 4,
+    "facility_price": 5,
+    "status_code": 6,
+    "description": -1
+  }
+}

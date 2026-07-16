@@ -1,0 +1,11 @@
+data/downloads/*
+!data/downloads/.gitkeep
+logs/*
+!logs/.gitkeep
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+clfs.db
+*.db

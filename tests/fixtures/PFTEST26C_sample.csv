@@ -1,0 +1,4 @@
+HCPCS Code,Carrier Number,Locality,Modifier,Year,Non Facility Fee Schedule Amount,Facility Fee Schedule Amount,Status Code,Description
+99213,10112,00,,2026,92.34,61.12,A,Office visit established patient
+99214,10112,00,,2026,128.50,88.20,A,Office visit established patient level 4
+71046,10112,00,26,2026,14.75,9.10,A,Chest x-ray 2 views
