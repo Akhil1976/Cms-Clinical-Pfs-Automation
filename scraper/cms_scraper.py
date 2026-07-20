@@ -2,7 +2,7 @@
 cms_scraper.py
 ---------------
 Everything that talks to www.cms.gov directly. Nothing in this file uses a
-third-party proxy or VPN service — CMS.gov is a public federal website and
+third-party proxy or VPN service â CMS.gov is a public federal website and
 is fetched directly over HTTPS.
 
 Three jobs:
@@ -17,6 +17,7 @@ Three jobs:
 """
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -46,7 +47,8 @@ class CMSFileUnavailable(CMSScraperError):
 
 def _is_pricing_file_code(file_code: str) -> bool:
     """Exclude CMS change-request/news rows which are not data downloads."""
-    return "CLAB" in file_code.upper()
+    file_code_upper = file_code.upper()
+    return "CLAB" in file_code_upper or file_code_upper.startswith("CR")
 
 
 def _session() -> requests.Session:
@@ -76,16 +78,16 @@ def list_available_files() -> list[dict]:
     (year-first), "11CLABMAR" (year + letters + month), "09CLAB" (no
     quarter at all), and "CR5362" (letters-first, no "CLAB" substring at
     all). No single regex covers all of these, and a new one could show up
-    at any time — so this function does not try.
+    at any time â so this function does not try.
 
     Instead, a row is considered valid using only the table's actual
     structure, which CMS already gives us as clean, explicit data:
       1. It has a link to a file detail page.
       2. It has a Calendar Year cell (found by matching the "Calendar Year"
-         column header — not by assuming a fixed column position, in case
+         column header â not by assuming a fixed column position, in case
          CMS reorders the columns).
     That's it. The filename text itself is only ever used as an opaque
-    identifier (file_code) for the download step and DB records — never
+    identifier (file_code) for the download step and DB records â never
     inspected for a pattern.
 
     Quarter (Q1-Q4) has no dedicated column on this page, so it's still
@@ -100,7 +102,7 @@ def list_available_files() -> list[dict]:
     if not all_tables:
         raise CMSScraperError(
             "No table was found on the CLFS Files page. CMS may have changed "
-            "the page layout — open the page in a browser and check whether "
+            "the page layout â open the page in a browser and check whether "
             "the file listing is still a table."
         )
 
@@ -108,7 +110,7 @@ def list_available_files() -> list[dict]:
     # like the "Show Entries" control), so the first table on the page is
     # not necessarily the file listing. Find the "Calendar Year" column by
     # its header text within EACH table, rather than assuming the first
-    # table found is the right one or hardcoding a column index — this
+    # table found is the right one or hardcoding a column index â this
     # survives both CMS reordering columns and adding extra tables.
     table = None
     year_col_index = None
@@ -129,7 +131,7 @@ def list_available_files() -> list[dict]:
     if table is None:
         raise CMSScraperError(
             "Could not find a 'Calendar Year' column on the CLFS Files page. "
-            "CMS may have renamed or removed it — open the page in a browser "
+            "CMS may have renamed or removed it â open the page in a browser "
             "and check the table headers."
         )
 
@@ -144,12 +146,12 @@ def list_available_files() -> list[dict]:
         # CMS's responsive table markup duplicates the column header text
         # inside every cell for mobile display (e.g. a Calendar Year cell's
         # actual .get_text() is "Calendar Year2026", not just "2026"). So we
-        # can't require the cell text to be a clean digit string — instead
+        # can't require the cell text to be a clean digit string â instead
         # pull the 4-digit year out with a regex.
         year_cell_text = cells[year_col_index].get_text(strip=True)
         year_match = re.search(r"(19|20)\d{2}", year_cell_text)
         if not (link and year_match):
-            continue  # doesn't satisfy either of the two required signals — skip it
+            continue  # doesn't satisfy either of the two required signals â skip it
 
         file_code = link.get_text(strip=True).upper()
         if not _is_pricing_file_code(file_code):
@@ -176,7 +178,7 @@ def list_available_files() -> list[dict]:
     if not files:
         raise CMSScraperError(
             "No valid file rows (link + Calendar Year) were found on the CLFS "
-            "Files page. CMS may have changed the page layout — open the page "
+            "Files page. CMS may have changed the page layout â open the page "
             "in a browser and check whether the table structure still matches "
             "what this scraper expects."
         )
@@ -190,7 +192,7 @@ def _find_zip_link(detail_page_html: str) -> str:
     soup = BeautifulSoup(detail_page_html, "html.parser")
     # Modern CMS.gov route (confirmed from live site, July 2026):
     #   cms.gov/license/ama?file=/files/zip/26clabq3.zip
-    # The old "license.asp?file=..." path is gone — CMS migrated this flow
+    # The old "license.asp?file=..." path is gone â CMS migrated this flow
     # to Drupal at /license/ama, and the query param's *value* is what ends
     # in .zip, not the href path itself.
     link = soup.find("a", href=re.compile(r"/license/ama\?file=.*\.zip", re.I))
@@ -234,7 +236,7 @@ def _find_accept_form(soup: BeautifulSoup):
     today because Accept is listed first, but it's one markup reshuffle away
     from silently submitting Cancel instead. Instead we explicitly find the
     form whose submit button is labeled "Accept" (and isn't "Don't Accept"),
-    or — even more robustly — the one carrying the `data-license="ama"`
+    or â even more robustly â the one carrying the `data-license="ama"`
     marker CMS puts on the real accept button.
     """
     for form in soup.find_all("form"):
@@ -252,7 +254,7 @@ def _accept_ama_license(session: requests.Session, license_url: str) -> requests
     """
     CLFS zips are gated behind CMS's standard "End User Point and Click
     License Agreement" for AMA CPT content. In a browser this is a page with
-    two buttons — "Accept" and "Don't Accept" — that are actually two
+    two buttons â "Accept" and "Don't Accept" â that are actually two
     independent forms (see _find_accept_form for the exact markup). We
     build the request from the Accept form specifically, ignoring the
     Cancel form entirely, so there's no chance of the wrong one being
@@ -263,7 +265,7 @@ def _accept_ama_license(session: requests.Session, license_url: str) -> requests
 
     content_type = get_resp.headers.get("Content-Type", "")
     if "zip" in content_type or "octet-stream" in content_type:
-        # No license page was actually served — we already have the file.
+        # No license page was actually served â we already have the file.
         return get_resp
 
     soup = BeautifulSoup(get_resp.text, "html.parser")
@@ -274,14 +276,14 @@ def _accept_ama_license(session: requests.Session, license_url: str) -> requests
             f"{license_url} but found none. CMS may have changed this flow."
         )
 
-    # form action is a path like "/files/zip/26clabq3.zip" — resolve against
+    # form action is a path like "/files/zip/26clabq3.zip" â resolve against
     # the license page URL, not CMS_BASE_URL, in case it's ever relative to
     # something more specific.
     action = urljoin(license_url, form.get("action") or license_url)
     method = (form.get("method") or "GET").upper()  # no method attr -> GET, per HTML spec
 
     # Only pull fields from THIS form (hidden "agree=yes" plus the Accept
-    # submit's own name/value) — never fields from the sibling Cancel form.
+    # submit's own name/value) â never fields from the sibling Cancel form.
     payload = {}
     for field in form.find_all("input"):
         name = field.get("name")
@@ -317,7 +319,14 @@ def download_file(file_code: str, detail_url: str) -> Path:
     detail_resp = session.get(detail_url, timeout=REQUEST_TIMEOUT)
     detail_resp.raise_for_status()
 
-    zip_link = _find_zip_link(detail_resp.text)
+    try:
+        zip_link = _find_zip_link(detail_resp.text)
+    except CMSScraperError as exc:
+        if file_code.upper().startswith("CR"):
+            raise CMSFileUnavailable(
+                f"Historical Change Request file {file_code} does not contain a data download."
+            ) from exc
+        raise
     logger.info("Resolved download link for %s: %s", file_code, zip_link)
 
     final_resp = (
@@ -330,7 +339,7 @@ def download_file(file_code: str, detail_url: str) -> Path:
         raise CMSScraperError(
             f"Response for {file_code} doesn't look like a zip file "
             f"(Content-Type={final_resp.headers.get('Content-Type')!r}). "
-            "The AMA license step likely changed — inspect the page manually."
+            "The AMA license step likely changed â inspect the page manually."
         )
 
     out_dir = DOWNLOAD_DIR / file_code
@@ -346,6 +355,42 @@ def download_file(file_code: str, detail_url: str) -> Path:
 # ---------------------------------------------------------------------------
 EXCLUDE_PATTERNS = re.compile(r"(layout|readme|instructions|record[_ ]?spec|ddl)", re.I)
 DATA_EXTENSIONS = (".csv", ".txt")
+
+
+def _normalize_paths_on_disk(destination: Path):
+    """
+    On Windows, external extractors (like tar) can create files or folders
+    with trailing spaces or backslashes in their names. Standard Win32 APIs
+    used by Python cannot access them, resulting in FileNotFoundError.
+    This helper walks the extracted tree bottom-up and renames files/folders
+    to clean up any trailing spaces or internal backslashes.
+    """
+    import os
+    dest_str = str(destination.resolve())
+    prefix = "\\\\?\\" if os.name == "nt" and not dest_str.startswith("\\\\?\\") else ""
+    raw_dest = prefix + dest_str
+
+    for root, dirs, files in os.walk(raw_dest, topdown=False):
+        for f in files:
+            clean_f = f.strip()
+            if clean_f != f or "\\" in f or "/" in f:
+                clean_f = clean_f.replace("\\", "/").split("/")[-1]
+                old_path = os.path.join(root, f)
+                new_path = os.path.join(root, clean_f)
+                try:
+                    os.rename(old_path, new_path)
+                except Exception as e:
+                    logger.warning("Failed to rename file %s to %s: %s", old_path, new_path, e)
+        for d in dirs:
+            clean_d = d.strip()
+            if clean_d != d:
+                old_path = os.path.join(root, d)
+                new_path = os.path.join(root, clean_d)
+                try:
+                    os.rename(old_path, new_path)
+                except Exception as e:
+                    logger.warning("Failed to rename directory %s to %s: %s", old_path, new_path, e)
+
 
 def _safe_extract_zip(zip_path: Path, destination: Path) -> list[Path]:
     """Extract only usable archive members, avoiding legacy Excel compression."""
@@ -370,31 +415,40 @@ def _safe_extract_zip(zip_path: Path, destination: Path) -> list[Path]:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
-    except NotImplementedError:
+    except (NotImplementedError, zipfile.BadZipFile, OSError) as exc:
+        logger.info("Python zipfile extraction failed for %s (%s). Falling back to 7-Zip/tar.", zip_path.name, type(exc).__name__)
         seven_zip = shutil.which("7z")
         if not seven_zip:
             installed = Path(r"C:\Program Files\7-Zip\7z.exe")
             seven_zip = str(installed) if installed.exists() else None
+        
+        detail = "unknown extractor error"
         if seven_zip:
-            # Ask 7-Zip only for relevant CMS data/archive members; this also
-            # avoids extracting the legacy Excel member that Python cannot read.
+            # Ask 7-Zip only for relevant CMS data/archive members
             result = subprocess.run(
                 [seven_zip, "x", "-y", f"-o{destination}", str(zip_path), "*.csv", "*.txt", "*.zip"],
                 capture_output=True, text=True, check=False,
             )
-            if result.returncode == 0:
-                return [path for path in destination.rglob("*") if path.is_file()]
             detail = result.stderr.strip() or result.stdout.strip() or "unknown 7-Zip error"
         else:
             result = subprocess.run(
                 ["tar", "-xf", str(zip_path), "-C", str(destination)],
                 capture_output=True, text=True, check=False,
             )
-            detail = result.stderr.strip() or result.stdout.strip() or "unknown extractor error"
-        raise CMSScraperError(
-            f"Could not extract {zip_path.name}; its data member uses unsupported compression: {detail}"
-        )
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown tar error"
+
+        _normalize_paths_on_disk(destination)
+
+        # Check if we successfully extracted at least one CSV/TXT/ZIP file
+        extracted_files = [p for p in destination.rglob("*") if p.is_file() and p.suffix.lower() in wanted_extensions]
+        if not extracted_files:
+            raise CMSScraperError(
+                f"Could not extract {zip_path.name}; its data member uses unsupported compression: {detail}"
+            ) from exc
+
+    _normalize_paths_on_disk(destination)
     return [path for path in destination.rglob("*") if path.is_file()]
+
 
 def unzip_and_locate_data_file(zip_path: Path) -> tuple[Path, list[Path]]:
     """

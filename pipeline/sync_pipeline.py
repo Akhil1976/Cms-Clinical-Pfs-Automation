@@ -181,6 +181,13 @@ def process_mpfs_file(file_code: str, detail_url: str | None = None, description
 
         return _finish_processing("MPFS", file_code, year_for_db, None, description,
                                    [_map_mpfs_record(r) for r in raw_records])
+    except mpfs_scraper.MPFSFileUnavailable as exc:
+        year_for_db = calendar_year or _infer_mpfs_year_from_code(file_code)
+        database.record_processed_file(
+            file_code, "MPFS", year_for_db, None, description, 0, "", status="unavailable"
+        )
+        logger.warning("Skipping unavailable historical MPFS file %s: %s", file_code, exc)
+        return {"file_code": file_code, "source_file": "MPFS", "status": "unavailable", "summary": None}
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed processing MPFS file %s", file_code)
         email_notifier.notify_error(file_code, exc)

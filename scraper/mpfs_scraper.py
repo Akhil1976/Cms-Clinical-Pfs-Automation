@@ -10,7 +10,7 @@ jobs), but the MPFS pages are simpler than the CLFS ones:
                                      the live site (July 2026): the file's
                                      detail page has a "Downloads" section
                                      with a direct link straight to the
-                                     zip — there is no AMA license
+                                     zip â there is no AMA license
                                      click-through step like CLFS has.
 3. unzip_and_locate_mpfs_data_file() -> extract the zip and find the real
                                      data file. MPFS zips sometimes contain
@@ -24,6 +24,7 @@ jobs), but the MPFS pages are simpler than the CLFS ones:
 """
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -47,6 +48,10 @@ logger = logging.getLogger("clfs.scraper.mpfs")
 
 class MPFSScraperError(Exception):
     """Raised whenever the MPFS pages don't respond the way we expect."""
+
+
+class MPFSFileUnavailable(MPFSScraperError):
+    """Raised when a historical MPFS file is no longer served by CMS."""
 
 
 def _session() -> requests.Session:
@@ -96,8 +101,9 @@ def list_available_files() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Download one file � no license gate, just a direct "Downloads" link
-# ---------------------------------------------------------------------------def _find_zip_link(detail_page_html: str) -> str:
+# 2. Download one file  no license gate, just a direct "Downloads" link
+# ---------------------------------------------------------------------------
+def _find_zip_link(detail_page_html: str) -> str:
     soup = BeautifulSoup(detail_page_html, "html.parser")
     # Confirmed from the live site (July 2026): the detail page has a
     # "Downloads" section containing a direct link to the zip file.
@@ -113,14 +119,30 @@ def download_file(file_code: str, detail_url: str) -> Path:
     DOWNLOAD_DIR/<file_code>/<file_code>.zip and returns that path.
     """
     session = _session()
-    detail_resp = session.get(detail_url, timeout=REQUEST_TIMEOUT)
-    detail_resp.raise_for_status()
+    try:
+        detail_resp = session.get(detail_url, timeout=REQUEST_TIMEOUT)
+        detail_resp.raise_for_status()
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            raise MPFSFileUnavailable(
+                f"CMS no longer serves the historical archive requested by {detail_url}."
+            ) from exc
+        raise
 
-    zip_link = _find_zip_link(detail_resp.text)
+    try:
+        zip_link = _find_zip_link(detail_resp.text)
+    except MPFSScraperError as exc:
+        raise MPFSFileUnavailable(
+            f"Historical MPFS file {file_code} does not contain a data download."
+        ) from exc
     logger.info("Resolved MPFS download link for %s: %s", file_code, zip_link)
 
-    final_resp = session.get(zip_link, timeout=REQUEST_TIMEOUT)
-    final_resp.raise_for_status()
+    if "apps/ama/license.asp" in zip_link:
+        from scraper import cms_scraper
+        final_resp = cms_scraper._accept_ama_license(session, zip_link)
+    else:
+        final_resp = session.get(zip_link, timeout=REQUEST_TIMEOUT)
+        final_resp.raise_for_status()
 
     if "zip" not in final_resp.headers.get("Content-Type", "") and final_resp.content[:2] != b"PK":
         raise MPFSScraperError(
@@ -137,10 +159,46 @@ def download_file(file_code: str, detail_url: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 3. Unzip and find the actual data file — honoring the QP / non-QP split
+# 3. Unzip and find the actual data file â honoring the QP / non-QP split
 # ---------------------------------------------------------------------------
 EXCLUDE_PATTERNS = re.compile(r"(layout|readme|instructions|record[_ ]?spec|ddl)", re.I)
 DATA_EXTENSIONS = (".csv", ".txt")
+
+
+
+def _normalize_paths_on_disk(destination: Path):
+    """
+    On Windows, external extractors (like tar) can create files or folders
+    with trailing spaces or backslashes in their names. Standard Win32 APIs
+    used by Python cannot access them, resulting in FileNotFoundError.
+    This helper walks the extracted tree bottom-up and renames files/folders
+    to clean up any trailing spaces or internal backslashes.
+    """
+    import os
+    dest_str = str(destination.resolve())
+    prefix = "\\\\?\\" if os.name == "nt" and not dest_str.startswith("\\\\?\\") else ""
+    raw_dest = prefix + dest_str
+
+    for root, dirs, files in os.walk(raw_dest, topdown=False):
+        for f in files:
+            clean_f = f.strip()
+            if clean_f != f or "\\" in f or "/" in f:
+                clean_f = clean_f.replace("\\", "/").split("/")[-1]
+                old_path = os.path.join(root, f)
+                new_path = os.path.join(root, clean_f)
+                try:
+                    os.rename(old_path, new_path)
+                except Exception as e:
+                    logger.warning("Failed to rename file %s to %s: %s", old_path, new_path, e)
+        for d in dirs:
+            clean_d = d.strip()
+            if clean_d != d:
+                old_path = os.path.join(root, d)
+                new_path = os.path.join(root, clean_d)
+                try:
+                    os.rename(old_path, new_path)
+                except Exception as e:
+                    logger.warning("Failed to rename directory %s to %s: %s", old_path, new_path, e)
 
 
 def _safe_extract_zip(zip_path: Path, destination: Path) -> list[Path]:
@@ -168,17 +226,30 @@ def _safe_extract_zip(zip_path: Path, destination: Path) -> list[Path]:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
-    except NotImplementedError:
+    except (NotImplementedError, zipfile.BadZipFile, OSError) as exc:
+        logger.info("Python zipfile extraction failed for %s (%s). Falling back to tar.", zip_path.name, type(exc).__name__)
+        # Ensure destination exists
+        destination.mkdir(parents=True, exist_ok=True)
+        # Fall back to command line tar
         result = subprocess.run(
             ["tar", "-xf", str(zip_path), "-C", str(destination)],
             capture_output=True, text=True, check=False,
         )
-        if result.returncode:
+        # Normalize any trailing spaces/backslashes created by tar on disk
+        _normalize_paths_on_disk(destination)
+
+        # Check if we successfully extracted at least one CSV/TXT/ZIP file
+        extracted_files = [p for p in destination.rglob("*") if p.is_file() and p.suffix.lower() in wanted_extensions]
+        if not extracted_files:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown extractor error"
             raise MPFSScraperError(
                 f"Could not extract {zip_path.name}; its data member uses unsupported compression: {detail}"
-            )
+            ) from exc
+
+    # Final normalization just in case
+    _normalize_paths_on_disk(destination)
     return [path for path in destination.rglob("*") if path.is_file()]
+
 
 def _pick_data_file(paths: list[Path]) -> Path | None:
     candidates = [

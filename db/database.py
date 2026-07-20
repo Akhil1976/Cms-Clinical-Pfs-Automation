@@ -182,24 +182,9 @@ def is_file_already_processed(file_code: str) -> bool:
 
 def upsert_records(source_file: str, file_code: str, calendar_year: int, records: list[dict]) -> dict:
     """
-    Inserts new rows and updates existing ones in the single standardized
-    `fee_schedule_pricing` table (now trimmed to its 8 final columns).
-
-    `source_file` is 'CLFS' or 'MPFS' — used here only to route bookkeeping
-    into `processed_files`/`change_log` (which still track it); it is NOT
-    stored on the pricing row itself anymore. Each dict in `records` must
-    already be mapped to the standard column names (procedure_code,
-    pcd_modifier, mdcr_carrier_id, mdcr_fee_schd_id, fee_schd_price,
-    pos_fee_schd_price, fee_schd_type_code) — see
-    pipeline/sync_pipeline.py for the CLFS/MPFS -> standard mapping.
-
-    A row is matched as "the same record" by the composite key
-    (procedure_code, pcd_modifier, procedure_fee_year, mdcr_carrier_id,
-    mdcr_fee_schd_id) — this is also the table's real UNIQUE constraint.
-    CLFS rows always use the sentinel 'NA' for carrier/locality (never a
-    real value — CLFS just doesn't have that concept), so this still
-    correctly matches CLFS-to-CLFS across quarters without colliding with
-    MPFS, which always carries a real carrier + locality value.
+    Optimized version of upsert_records. Uses in-memory lookup, deduplicates records
+    within the same file, and performs bulk operations to prevent IntegrityError
+    and maximize performance.
     """
     new_count = 0
     updated_count = 0
@@ -207,76 +192,106 @@ def upsert_records(source_file: str, file_code: str, calendar_year: int, records
     now = _now()
 
     with get_connection() as conn:
+        logger.info("Fetching existing records for year %d from database...", calendar_year)
+        existing_rows = conn.execute(
+            """SELECT PROCEDURE_CODE, PCD_MODIFIER, MDCR_CARRIER_ID, MDCR_FEE_SCHD_ID,
+                      FEE_SCHD_PRICE, POS_FEE_SCHD_PRICE, FEE_SCHD_TYPE_CODE
+               FROM fee_schedule_pricing
+               WHERE PROCEDURE_FEE_YEAR = ?""",
+            (calendar_year,)
+        ).fetchall()
+
+        # Build a fast lookup dictionary
+        lookup = {}
+        for row in existing_rows:
+            key = (row["PROCEDURE_CODE"], row["PCD_MODIFIER"], row["MDCR_CARRIER_ID"], row["MDCR_FEE_SCHD_ID"])
+            lookup[key] = (row["FEE_SCHD_PRICE"], row["POS_FEE_SCHD_PRICE"], row["FEE_SCHD_TYPE_CODE"])
+
+        logger.info("Loaded %d existing records for lookup.", len(lookup))
+
+        # Dictionaries to buffer bulk DB operations and handle duplicates in the same file
+        pending_inserts = {}
+        pending_updates = {}
+        pending_changes = {}  # key -> change log tuple
+
         for rec in records:
-            # mdcr_carrier_id / mdcr_fee_schd_id are NOT NULL columns (needed for the
-            # UNIQUE constraint to work). CLFS always sends 'NA' already (see
-            # pipeline/sync_pipeline.py::_map_clfs_record). This guards against an
-            # MPFS row that's simply missing carrier/locality data in the raw file —
-            # falls back to 'NA' rather than letting a NULL insert fail.
             carrier_id = rec.get("mdcr_carrier_id") or "NA"
             locality_id = rec.get("mdcr_fee_schd_id") or "NA"
+            key = (rec["procedure_code"], rec["pcd_modifier"], carrier_id, locality_id)
 
-            existing = conn.execute(
-                """SELECT FEE_SCHD_PRICE, POS_FEE_SCHD_PRICE, FEE_SCHD_TYPE_CODE
-                   FROM fee_schedule_pricing
-                   WHERE PROCEDURE_CODE = ? AND PCD_MODIFIER = ? AND PROCEDURE_FEE_YEAR = ?
-                     AND MDCR_CARRIER_ID = ? AND MDCR_FEE_SCHD_ID = ?""",
-                (
-                    rec["procedure_code"], rec["pcd_modifier"], calendar_year,
-                    carrier_id, locality_id,
-                ),
-            ).fetchone()
+            existing = lookup.get(key)
 
             if existing is None:
-                conn.execute(
-                    """INSERT INTO fee_schedule_pricing
-                       (PROCEDURE_CODE, MDCR_CARRIER_ID, MDCR_FEE_SCHD_ID, PCD_MODIFIER,
-                        PROCEDURE_FEE_YEAR, FEE_SCHD_PRICE, POS_FEE_SCHD_PRICE, FEE_SCHD_TYPE_CODE)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        rec["procedure_code"], carrier_id, locality_id, rec["pcd_modifier"],
-                        calendar_year, rec.get("fee_schd_price"), rec.get("pos_fee_schd_price"),
-                        rec.get("fee_schd_type_code"),
-                    ),
+                # Deduplicates inserts within the same file (keeps the last one)
+                pending_inserts[key] = (
+                    rec["procedure_code"], carrier_id, locality_id, rec["pcd_modifier"],
+                    calendar_year, rec.get("fee_schd_price"), rec.get("pos_fee_schd_price"),
+                    rec.get("fee_schd_type_code")
                 )
-                conn.execute(
-                    """INSERT INTO change_log (file_code, source_file, procedure_code, pcd_modifier,
-                                                change_type, old_price, new_price, changed_at)
-                       VALUES (?, ?, ?, ?, 'NEW', NULL, ?, ?)""",
-                    (file_code, source_file, rec["procedure_code"], rec["pcd_modifier"], rec.get("fee_schd_price"), now),
+                pending_changes[key] = (
+                    file_code, source_file, rec["procedure_code"], rec["pcd_modifier"],
+                    'NEW', None, rec.get("fee_schd_price"), now
                 )
-                new_count += 1
-                continue
-
-            changed = (
-                existing["FEE_SCHD_PRICE"] != rec.get("fee_schd_price")
-                or existing["POS_FEE_SCHD_PRICE"] != rec.get("pos_fee_schd_price")
-                or existing["FEE_SCHD_TYPE_CODE"] != rec.get("fee_schd_type_code")
-            )
-            if changed:
-                conn.execute(
-                    """UPDATE fee_schedule_pricing
-                       SET FEE_SCHD_TYPE_CODE = ?, FEE_SCHD_PRICE = ?, POS_FEE_SCHD_PRICE = ?
-                       WHERE PROCEDURE_CODE = ? AND PCD_MODIFIER = ? AND PROCEDURE_FEE_YEAR = ?
-                         AND MDCR_CARRIER_ID = ? AND MDCR_FEE_SCHD_ID = ?""",
-                    (
+            else:
+                existing_price, existing_pos_price, existing_type = existing
+                changed = (
+                    existing_price != rec.get("fee_schd_price")
+                    or existing_pos_price != rec.get("pos_fee_schd_price")
+                    or existing_type != rec.get("fee_schd_type_code")
+                )
+                if changed:
+                    # Deduplicates updates within the same file (keeps the last one)
+                    pending_updates[key] = (
                         rec.get("fee_schd_type_code"), rec.get("fee_schd_price"), rec.get("pos_fee_schd_price"),
                         rec["procedure_code"], rec["pcd_modifier"], calendar_year,
-                        carrier_id, locality_id,
-                    ),
-                )
-                conn.execute(
-                    """INSERT INTO change_log (file_code, source_file, procedure_code, pcd_modifier,
-                                                change_type, old_price, new_price, changed_at)
-                       VALUES (?, ?, ?, ?, 'UPDATED', ?, ?, ?)""",
-                    (
+                        carrier_id, locality_id
+                    )
+                    pending_changes[key] = (
                         file_code, source_file, rec["procedure_code"], rec["pcd_modifier"],
-                        existing["FEE_SCHD_PRICE"], rec.get("fee_schd_price"), now,
-                    ),
-                )
-                updated_count += 1
-            else:
-                unchanged_count += 1
+                        'UPDATED', existing_price, rec.get("fee_schd_price"), now
+                    )
+                else:
+                    # If it wasn't modified from the database, but was previously updated/inserted
+                    # by another record in the same file, keep unchanged count correct.
+                    if key not in pending_inserts and key not in pending_updates:
+                        unchanged_count += 1
+
+        # Calculate final counts
+        new_count = len(pending_inserts)
+        updated_count = len(pending_updates)
+
+        # Convert dict values to lists for SQL execution
+        insert_pricing = list(pending_inserts.values())
+        update_pricing = list(pending_updates.values())
+        insert_changes = list(pending_changes.values())
+
+        # Execute bulk operations
+        if insert_pricing:
+            logger.info("Bulk inserting %d new pricing records...", len(insert_pricing))
+            conn.executemany(
+                """INSERT INTO fee_schedule_pricing
+                   (PROCEDURE_CODE, MDCR_CARRIER_ID, MDCR_FEE_SCHD_ID, PCD_MODIFIER,
+                    PROCEDURE_FEE_YEAR, FEE_SCHD_PRICE, POS_FEE_SCHD_PRICE, FEE_SCHD_TYPE_CODE)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                insert_pricing
+            )
+        if update_pricing:
+            logger.info("Bulk updating %d existing pricing records...", len(update_pricing))
+            conn.executemany(
+                """UPDATE fee_schedule_pricing
+                   SET FEE_SCHD_TYPE_CODE = ?, FEE_SCHD_PRICE = ?, POS_FEE_SCHD_PRICE = ?
+                   WHERE PROCEDURE_CODE = ? AND PCD_MODIFIER = ? AND PROCEDURE_FEE_YEAR = ?
+                     AND MDCR_CARRIER_ID = ? AND MDCR_FEE_SCHD_ID = ?""",
+                update_pricing
+            )
+        if insert_changes:
+            logger.info("Bulk inserting %d change log entries...", len(insert_changes))
+            conn.executemany(
+                """INSERT INTO change_log (file_code, source_file, procedure_code, pcd_modifier,
+                                            change_type, old_price, new_price, changed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                insert_changes
+            )
 
     return {"new": new_count, "updated": updated_count, "unchanged": unchanged_count, "total": len(records)}
 
